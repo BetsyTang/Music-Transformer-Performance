@@ -39,6 +39,7 @@ class MusicTransformer(nn.Module):
                  max_rel_dist=hparams["max_rel_dist"],
                  max_abs_position=hparams["max_abs_position"],
                  vocab_size=hparams["vocab_size"],
+                 num_of_performers = hparams["num_of_performers"],
                  bias=hparams["bias"],
                  dropout=hparams["dropout"],
                  layernorm_eps=hparams["layernorm_eps"]):
@@ -65,6 +66,7 @@ class MusicTransformer(nn.Module):
         self.max_rel_dist = max_rel_dist,
         self.max_position = max_abs_position
         self.vocab_size = vocab_size
+        self.num_of_performers = num_of_performers
 
         self.input_embedding = nn.Embedding(vocab_size, d_model)
         self.positional_encoding = abs_positional_encoding(max_abs_position, d_model)
@@ -77,7 +79,7 @@ class MusicTransformer(nn.Module):
             norm=nn.LayerNorm(normalized_shape=d_model, eps=layernorm_eps)
         )
 
-        self.final = nn.Linear(d_model, vocab_size)
+        self.final = nn.Linear(d_model, num_of_performers) #vocab_size, change to identity
 
     def forward(self, x, mask=None):
         """

@@ -13,12 +13,15 @@ for music-transformer, or at https://www.gnu.org/licenses/gpl-3.0.html.
 
 import os
 import argparse
+import pandas as pd
+import numpy as np
 import torch
 import torch.nn.functional as F
 from random import randint, sample
 from sys import exit
 from vocabulary import *
 from tokenizer import *
+from tqdm import tqdm
 
 """
 Functionality to preprocess MIDI files translated into indices in the event vocabulary from command line
@@ -47,7 +50,7 @@ def sample_end_data(seqs, lth, factor=6):
     return data
 
 
-def sample_data(seqs, lth, factor=6):
+def sample_data(seqs, idens, lth, factor=6):
     """
     Randomly samples sequences of length ~lth from an input set of sequences seqs. Prepares data for augmentation.
     Returns a list.
@@ -60,13 +63,28 @@ def sample_data(seqs, lth, factor=6):
     Returns:
         input sequs cut to length ~lth
     """
-    data = []
-    for seq in seqs:
+        
+    
+    tseqs = []
+    for i in range(len(seqs)):
+        seq = seqs[i]
         length = randint(lth - lth // factor, lth + lth // factor)
         idx = randint(0, max(0, len(seq) - length))
-        data.append(seq[idx:idx+length])
         
-    return data
+        seqs[i] = torch.LongTensor(seq[idx:idx+length])
+        # seqs[i] = torch.LongTensor(seqs[i])
+        tseq = torch.LongTensor(np.repeat(idens[i], seqs[i].shape[0], 0))
+        assert tseq.shape == seqs[i].shape
+        tseqs.append(tseq)
+    
+    seqs = torch.nn.utils.rnn.pad_sequence(seqs, padding_value=pad_token).transpose(-1, -2)
+    tseqs = torch.nn.utils.rnn.pad_sequence(tseqs, padding_value=pad_token).transpose(-1, -2)
+    
+    print(seqs.shape)
+    print(tseqs.shape)
+    
+    data_dir = {'seq': seqs, 'target': tseqs, 'label': idens}
+    return data_dir
 
 
 def aug(data, note_shifts=None, time_stretches=None, verbose=False):
@@ -222,35 +240,49 @@ if __name__ == "__main__":
     args.length = int(args.length)
 
     DATA = []
+    IDENTITY = []
     PATH = args.source
+    CSV_PATH = "/homes/jt004/OSPI/data/data_mazurka/mazurka-discography_selection.csv"
 
-    # load parsed midi files
-    if not args.from_augmented_data:
-        print("Translating midi files to event vocabulary (NOTE: may take a while)...") if args.verbose else None
-        for file in os.listdir(PATH):
-            try:
-                idx_list = midi_parser(fname=PATH + file)[0]
-                DATA.append(idx_list)
-            except OSError:
-                pass
-        print("Done!") if args.verbose else None
-
+    data_paths = pd.read_csv(CSV_PATH, header=0)
+    
+    #load parsed midi files
+    # if not args.from_augmented_data:
+    #     print("Translating midi files to event vocabulary (NOTE: may take a while)...") if args.verbose else None
+    #     for i in tqdm(range(len(data_paths)),leave=False):
+    #         file = data_paths.loc[i]
+    #         try:
+    #             idx_list = midi_parser(fname=PATH + file['midi_filename'])[0]
+    #             DATA.append(idx_list)
+    #             IDENTITY.append(file['performer_id'])
+    #         except OSError:
+    #             print(file['midi_filename'])
+    #             pass
+    #     print("Done!") if args.verbose else None
+    #     data_dir = {'seq': DATA, 'label': IDENTITY}
+    #     np.save("data.npy", data_dir)
+    
+    DATA = np.load("data.npy", allow_pickle=True).item()['seq']
+    IDENTITY = np.load("data.npy", allow_pickle=True).item()['label']
     # randomly sample endings
     print("Randomly sampling and cutting data to length...") if args.verbose else None
-    DATA = sample_data(DATA, lth=args.length) + sample_end_data(DATA, lth=args.length)
+    # DATA = sample_data(DATA, lth=args.length) + sample_end_data(DATA, lth=args.length)
+    data_dir = sample_data(DATA, IDENTITY, lth=args.length)
     print("Done!") if args.verbose else None
 
     # augment data
-    if not args.from_augmented_data:
-        print("Augmenting data (NOTE: may take even longer)...") if args.verbose else None
-        DATA = aug(DATA, note_shifts=args.transpositions, time_stretches=args.time_stretches,
-                   verbose=(args.verbose >= 2))
-        print("Done!") if args.verbose else None
+    # if not args.from_augmented_data:
+    #     print("Augmenting data (NOTE: may take even longer)...") if args.verbose else None
+    #     DATA = aug(DATA, note_shifts=args.transpositions, time_stretches=args.time_stretches,
+    #                verbose=(args.verbose >= 2))
+    #     print("Done!") if args.verbose else None
     
     # shuffle data
-    DATA = DATA[torch.randperm(DATA.shape[0])]
+    # DATA = DATA[torch.randperm(DATA.shape[0])]
     
     # save
+    # data_dir = {'seq': DATA, 'label': IDENTITY}
     print("Saving...") if args.verbose else None
-    torch.save(DATA, args.destination)
+    torch.save(data_dir, args.destination)
     print("Done!")
+

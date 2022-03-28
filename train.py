@@ -13,6 +13,7 @@ for music-transformer, or at https://www.gnu.org/licenses/gpl-3.0.html.
 
 import argparse
 import time
+from tqdm import tqdm
 import os
 import torch
 import torch.nn.functional as F
@@ -21,6 +22,10 @@ from torch.utils.data import DataLoader, TensorDataset
 from hparams import device
 from masking import create_mask
 from model import MusicTransformer
+from sklearn.model_selection import train_test_split, StratifiedShuffleSplit
+
+torch.cuda.empty_cache()
+
 
 """
 Functionality to train a Music Transformer on a single CPU or single GPU
@@ -75,13 +80,14 @@ def loss_fn(prediction, target, criterion=F.cross_entropy):
     """
     mask = torch.ne(target, torch.zeros_like(target))           # ones where target is 0
     _loss = criterion(prediction, target, reduction='none')     # loss before masking
-
+    print(_loss)
     # multiply mask to loss elementwise to zero out pad positions
     mask = mask.to(_loss.dtype)
     _loss *= mask
-
+    print(_loss)
     # output is average over the number of values that were not masked
     return torch.sum(_loss) / torch.sum(mask)
+    # return torch.sum(_loss) / target.shape[0]
 
 
 def train_step(model: MusicTransformer, opt, sched, inp, tar):
@@ -99,11 +105,16 @@ def train_step(model: MusicTransformer, opt, sched, inp, tar):
         loss before current backward pass
     """
     # forward pass
+    
+    # predictions = model(inp, mask=create_mask(inp, n=inp.dim() + 2))
+    print(tar.cpu().numpy())
     predictions = model(inp, mask=create_mask(inp, n=inp.dim() + 2))
-
+    # print(predictions.cpu().detach().numpy())
     # backward pass
     opt.zero_grad()
     loss = loss_fn(predictions.transpose(-1, -2), tar)
+    # acc = torch.argmax(predictions.transpose(-1, -2), dim=1)
+    # acc = torch.sum(predictions.transpose(-1, -2) == tar).item()
     loss.backward()
     opt.step()
     sched.step()
@@ -162,24 +173,39 @@ class MusicTransformerTrainer:
         # get the data
         self.datapath = datapath
         self.batch_size = batch_size
-        data = torch.load(datapath).long().to(device)
+        data = torch.load(datapath)
+        X = data['seq']
+        Y = data['target']
+        L = data['label']
+        sss = StratifiedShuffleSplit(n_splits=1, test_size=0.1, random_state=1)
+    
+        for train_index, val_index in sss.split(X, L):
+            train_data, val_data = X[train_index], X[val_index]
+            train_target, val_target = Y[train_index], Y[val_index]
+        
+        train_data = train_data.long()
+        train_target = train_target.long()
+        val_data = val_data.long()
+        val_target = val_target.long()
 
         # max absolute position must be able to acount for the largest sequence in the data
         if hparams_["max_abs_position"] > 0:
             hparams_["max_abs_position"] = max(hparams_["max_abs_position"], data.shape[-1])
 
         # train / validation split: 80 / 20
-        train_len = round(data.shape[0] * 0.8)
-        train_data = data[:train_len]
-        val_data = data[train_len:]
-        print(f"There are {data.shape[0]} samples in the data, {len(train_data)} training samples and {len(val_data)} "
+        # train_len = round(data.shape[0] * 0.8)
+        # train_data = data[:train_len]
+        # val_data = data[train_len:]
+        print(f"There are {X.shape[0]} samples in the data, {len(train_data)} training samples and {len(val_data)} "
               "validation samples")
 
         # datasets and dataloaders: split data into first (n-1) and last (n-1) tokens
-        self.train_ds = TensorDataset(train_data[:, :-1], train_data[:, 1:])
+        # self.train_ds = (train_data[:, :-1], train_data[:, 1:])
+        self.train_ds = TensorDataset(train_data, train_target)
         self.train_dl = DataLoader(dataset=self.train_ds, batch_size=batch_size, shuffle=True)
 
-        self.val_ds = TensorDataset(val_data[:, :-1], val_data[:, 1:])
+        # self.val_ds = TensorDataset(val_data[:, :-1], val_data[:, 1:])
+        self.val_ds = TensorDataset(val_data, val_target)
         self.val_dl = DataLoader(dataset=self.val_ds, batch_size=batch_size, shuffle=True)
 
         # create model
@@ -285,19 +311,23 @@ class MusicTransformerTrainer:
         start = time.time()
 
         print("Beginning training...")
-
+        
         try:
             for epoch in range(epochs):
                 train_epoch_losses = []
                 val_epoch_losses = []
 
                 self.model.train()
-                for train_inp, train_tar in self.train_dl:
+                for train_inp, train_tar in tqdm(self.train_dl,leave=False):
+                    train_inp = train_inp.to(device)
+                    train_tar = train_tar.to(device)
                     loss = train_step(self.model, self.optimizer, self.scheduler, train_inp, train_tar)
                     train_epoch_losses.append(loss)
 
                 self.model.eval()
-                for val_inp, val_tar in self.val_dl:
+                for val_inp, val_tar in tqdm(self.val_dl, leave=False):
+                    val_inp = val_inp.to(device)
+                    val_tar = val_tar.to(device)
                     loss = val_step(self.model, val_inp, val_tar)
                     val_epoch_losses.append(loss)
 
@@ -311,13 +341,13 @@ class MusicTransformerTrainer:
                 self.val_losses.append(val_mean)
                 val_losses.append(val_mean)
 
-                if ((epoch + 1) % print_interval) == 0:
-                    print(f"Epoch {epoch + 1} Time taken {round(time.time() - start, 2)} seconds "
-                          f"Train Loss {train_losses[-1]} Val Loss {val_losses[-1]}")
+                # if ((epoch + 1) % print_interval) == 0:
+                print(f"Epoch {epoch + 1} Time taken {round(time.time() - start, 2)} seconds "
+                    f"Train Loss {train_losses[-1]} Val Loss {val_losses[-1]}")
                     # print("Checkpointing...")
                     # self.save()
                     # print("Done")
-                    start = time.time()
+                start = time.time()
 
         except KeyboardInterrupt:
             pass
@@ -401,11 +431,13 @@ if __name__ == "__main__":
     parser.add_argument("-le", "--layernorm-eps",
                         help="epsilon in layernorm layers to avoid zero division; if loading from checkpoint, "
                              "this will be overwritten by saved hparams; default: 1e-6")
+    parser.add_argument("-np", "--number-of-performers",
+                        help="number of performers in the dataset")
 
     args = parser.parse_args()
 
     # fix optional parameters
-    batch_size_ = 32 if args.batch_size is None else args.batch_size
+    batch_size_ = 1 if args.batch_size is None else args.batch_size
     warmup_steps_ = 2000 if args.warmup_steps is None else args.warmup_steps
 
     # fix hyperparameters
@@ -419,12 +451,13 @@ if __name__ == "__main__":
     hparams["bias"] = args.no_bias
     hparams["dropout"] = args.dropout if args.dropout else hparams["dropout"]
     hparams["layernorm_eps"] = args.layernorm_eps if args.layernorm_eps else hparams["layernorm_eps"]
+    hparams["num_of_performers"] = args.number_of_performers if args.number_of_performers else hparams["num_of_performers"]
 
     # set up the trainer
     print("Setting up the trainer...")
     trainer = MusicTransformerTrainer(hparams, args.datapath, batch_size_, warmup_steps_,
                                       args.ckpt_path, args.load_checkpoint)
-    print()
+    print("Finish setting")
 
     # train the model
     trainer.fit(args.epochs)

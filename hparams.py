@@ -32,7 +32,8 @@ hparams = {
     "vocab_size": vocab_size,
     "bias": True,
     "dropout": 0.1,
-    "layernorm_eps": 1e-6
+    "layernorm_eps": 1e-6,
+    "num_of_performers": 32
 }
 
 # hparams for TF model - significantly larger
